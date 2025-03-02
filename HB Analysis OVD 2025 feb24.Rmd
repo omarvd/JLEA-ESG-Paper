@@ -1,0 +1,963 @@
+---
+title: "HB Analysis"
+author: "OVD"
+date: "2023-05-24"
+output: pdf_document
+---
+
+
+```{r}
+# Load required libraries
+library(readr)
+library(tidyverse)
+library(choicetools)
+library(boot)
+
+setwd("/Users/ovd/Documents/GitHub/esg_pensions")
+```
+
+# Data Loading 
+```{r}
+# Load and filter data for republican subsample
+data1 <- read_csv("datacj1.csv")
+data1 <- as.data.frame(data1) 
+
+```
+
+```{r}
+data1 = data1 %>% 
+  mutate(expected_pension = as.character(expected_pension))
+
+data1 = data1 %>%
+  mutate(pension = parse_number(expected_pension))
+
+```
+
+
+```{r include=FALSE}
+#This code below worked!
+
+data1 = data1 %>%
+ group_by(survey_id, choice_set) %>%
+ mutate(obs_id = cur_group_id()) %>% 
+  ungroup() # I had forgotten to do this!
+```
+
+```{r}
+# Preprocessing
+
+#'*Following choicetools vignette*
+cbc.tab = data1 %>% 
+  select(pension,firearms, fossil_fuels, may_employ_children, racial_diversity_mgmt, gender_equal_pay)
+
+cbc.tab = cbc.tab %>% 
+  mutate(pension = case_when(pension == 20000 ~ 1,
+                             pension == 25000 ~2,
+                             pension == 30000 ~3,
+                             pension == 35000 ~4,
+                             pension == 40000 ~5,
+                             pension ==45000 ~6,
+                             pension ==50000 ~7,
+                             pension == 55000 ~8,
+                             pension ==60000 ~9),
+         firearms = case_when(firearms == "Invests in firearms" ~ 1,
+                              firearms == "Does not invest in firearms" ~ 2),
+         fossil_fuels = case_when(fossil_fuels == "Invests in fossil fuels" ~ 1,
+                                  fossil_fuels == "Does not invest in fossil fuels" ~ 2),
+         may_employ_children = case_when(may_employ_children == "Invests in firms that may employ children" ~1,
+                                         may_employ_children == "Invests in firms that ensure no children are employed" ~2),
+         racial_diversity_mgmt = case_when(racial_diversity_mgmt == "Does not advocate for racial diversity in management" ~1,
+                                      racial_diversity_mgmt == "Advocates for racial diversity in management" ~2),
+         gender_equal_pay = case_when(gender_equal_pay == "Does not advocate for equal pay for men and women" ~1,
+                                      gender_equal_pay=="Advocates for equal pay for men and women"~2))
+
+cbc.win = data1$choice_indicator
+
+cbc.tasks = 12
+
+cbc.concepts = 2
+
+N = nrow(data1)/24
+```
+
+```{r}
+
+cbc.attrs <- c(pension=9, firearms=2, fossil_fuels=2, may_employ_children=2, racial_diversity_mgmt=2, gender_equal_pay=2)
+
+attr.list=cbc.attrs
+
+cbc.levels    <- c("$20,000", "$25,000", "$30,000", "$35,000", "$40,000", "$45,000", "$50,000", "$55,000", "$60,000",    # pension
+                   "Invests in firearms", "Does not invests in firearms",  # firearms
+                   "Invests in fossil fuels",  "Does not invest in fossil fuels",  # fossil fuels
+                   "Invests in firms that may employ children",  "Invests in firms that ensure no children are employed",                          # child labor
+                   "Does not advocate for racial diversity in management", "Advocates for racial diversity in management", # racial diversity
+                   "Does not advocate for equal pay for men and women", "Advocates for equal pay for men and women")           # equal pay 
+
+```
+
+#HB Estimation
+
+```{r}
+
+# HB Estimation
+set.seed(123)
+
+cbc.hb <- estimateMNLfromDesignHB(
+  tmp.des = cbc.tab, tmp.win = cbc.win,
+  kCards = cbc.concepts, kTrials = cbc.tasks,
+  kResp = N, mcmcIters = 10000
+)
+
+
+```
+# WTP Estimation
+
+```{r}
+# Extract rbetas (directly from HB output)
+rbetas <- read.csv("RBetas.csv")
+
+# Define attribute mappings with descriptive labels
+attribute_pairs <- list(
+  "Firearms" = c("A2B1", "A2B2"),
+  "Fossil_Fuels" = c("A3B1", "A3B2"),
+  "Child_Labor" = c("A4B1", "A4B2"),
+  "Racial_Diversity" = c("A5B1", "A5B2"),
+  "Gender_Pay" = c("A6B1", "A6B2")
+)
+
+# Define pension levels (cost attribute)
+pension_levels <- c("A1B1", "A1B2", "A1B3", "A1B4", "A1B5", "A1B6", "A1B7", "A1B8", "A1B9")
+pension_values <- c(20, 25, 30, 35, 40, 45, 50, 55, 60)
+
+# Step 1: Compute individual-level Δβ (part-worth differences)
+individual_delta_beta <- apply(rbetas, 1, function(beta_row) {
+  sapply(attribute_pairs, function(pair) {
+    beta_row[pair[1]] - beta_row[pair[2]] # baseline - policy
+  })
+})
+
+# Convert to matrix form (transpose so attributes are columns)
+individual_delta_beta <- t(individual_delta_beta)
+
+# Step 2: Compute β_cost (marginal utility of pension) **per respondent**
+individual_beta_cost <- apply(rbetas[, pension_levels], 1, function(beta_row) {
+  (beta_row[length(pension_levels)] - beta_row[1]) /
+    (pension_values[length(pension_values)] - pension_values[1])
+})
+
+# Step 3: Compute WTP for each respondent
+individual_wtp <- sweep(individual_delta_beta, 1, individual_beta_cost, "/") * -1000
+
+# Step 4: Compute median WTP across respondents (Conjointly's method)
+wtp_medians <- apply(individual_wtp, 2, median)
+
+# Assign readable attribute names
+attribute_names <- c("Firearms", "Fossil Fuels", "Child Labor", "Racial Diversity", "Gender Pay")
+
+# Create a WTP dataframe
+wtp_df <- data.frame(Attribute = attribute_names, WTP = wtp_medians)
+
+# Step 5: Define **corrected** bootstrap function
+bootstrap_wtp <- function(data, indices) {
+  sampled_data <- data[indices, , drop = FALSE] # Resample respondents
+  apply(sampled_data, 2, median) # Compute median WTP per bootstrap sample
+}
+
+# Step 6: Run bootstrap with 1000 iterations **on WTP directly**
+set.seed(123)
+boot_results <- boot(data = individual_wtp, statistic = bootstrap_wtp, R = 1000)
+
+# Step 7: Compute **corrected** standard errors and confidence intervals
+wtp_df$SE <- apply(boot_results$t, 2, sd)
+wtp_df$Lower_CI <- apply(boot_results$t, 2, quantile, probs = 0.025)
+wtp_df$Upper_CI <- apply(boot_results$t, 2, quantile, probs = 0.975)
+
+# Print final WTP table with standard errors and confidence intervals
+print(wtp_df)
+
+```
+
+
+
+# Preferences Plot
+
+```{r}
+cbc.est        <- data.frame(extractHBbetas(cbc.hb, cbc.attrs))
+names(cbc.est) <- cbc.levels
+cbc.est$ID     <- 1:nrow(cbc.est)
+
+library(ggplot2)
+library(reshape2)
+cbc.m <- melt(cbc.est, id.vars = "ID")
+
+library(ggridges)
+ggplot(data=cbc.m, aes(x=value, y=variable, group=variable)) +
+      geom_density_ridges(scale=0.9, alpha=0, jittered_points=TRUE,
+                          rel_min_height=0.005,
+                          position="points_sina",
+                          point_color = "blue", point_alpha=1/sqrt(N),
+                          point_size=2.5) +
+        ylab("Item") + 
+        xlab("Relative preference (blue circles=individuals)") +
+        ggtitle("Preference estimates: Distribution of individuals")
+```
+
+
+
+## Market Share Simulations
+
+```{r}
+prod1 <- c(7, 10, 12,  14, 16, 18)     # $45,000 pension with no sustainable features
+prod2 <- c(7, 11, 13, 15, 17, 19)     # $45,000 pension with only
+
+```
+
+
+
+```{r}
+
+# Function to calculate market shares for a given sample of preferences
+market_share_simulation <- function(data, indices) {
+  sampled_data <- data[indices, ] # Resample respondents
+  usb.pref <- marketSim(
+    sampled_data,
+    list(prod1, prod2), 
+    use.none = FALSE,
+    style = "first"
+  )
+  colMeans(usb.pref) # Return mean market shares for the two products
+}
+
+# Bootstrap to calculate confidence intervals
+set.seed(123)
+boot_results <- boot(
+  data = cbc.est,
+  statistic = market_share_simulation,
+  R = 1000 # Number of bootstrap resamples
+)
+
+# Extract mean market shares and confidence intervals
+mean_market_shares <- colMeans(marketSim(cbc.est, list(prod1, prod2), use.none = FALSE, style = "first"))
+ci_lower <- apply(boot_results$t, 2, quantile, probs = 0.025)
+ci_upper <- apply(boot_results$t, 2, quantile, probs = 0.975)
+
+# Combine results into a dataframe
+market_share_results <- data.frame(
+  Product = c("Product 1", "Product 2"),
+  Mean_Market_Share = mean_market_shares,
+  CI_Lower = ci_lower,
+  CI_Upper = ci_upper
+)
+
+# Print results
+print(market_share_results)
+```
+
+## Forego 5K
+
+```{r}
+prod1 <- c(7, 10, 12,  14, 16, 18)     # $45,000 pension with no sustainable features
+prod2 <- c(7, 11, 13, 15, 17, 19)     # $40,000 pension with only
+
+```
+
+
+
+```{r}
+
+# Function to calculate market shares for a given sample of preferences
+market_share_simulation <- function(data, indices) {
+  sampled_data <- data[indices, ] # Resample respondents
+  usb.pref <- marketSim(
+    sampled_data,
+    list(prod1, prod2), 
+    use.none = FALSE,
+    style = "first"
+  )
+  colMeans(usb.pref) # Return mean market shares for the two products
+}
+
+# Bootstrap to calculate confidence intervals
+set.seed(123)
+boot_results <- boot(
+  data = cbc.est,
+  statistic = market_share_simulation,
+  R = 1000 # Number of bootstrap resamples
+)
+
+# Extract mean market shares and confidence intervals
+mean_market_shares <- colMeans(marketSim(cbc.est, list(prod1, prod2), use.none = FALSE, style = "first"))
+ci_lower <- apply(boot_results$t, 2, quantile, probs = 0.025)
+ci_upper <- apply(boot_results$t, 2, quantile, probs = 0.975)
+
+# Combine results into a dataframe
+market_share_results <- data.frame(
+  Product = c("Product 1", "Product 2"),
+  Mean_Market_Share = mean_market_shares,
+  CI_Lower = ci_lower,
+  CI_Upper = ci_upper
+)
+
+# Print results
+print(market_share_results)
+```
+
+
+```{r}
+# Load libraries
+library(flextable)
+library(officer)
+
+# Create a Word document
+doc <- read_docx()
+
+# Convert WTP dataframe into a flextable
+wtp_table <- flextable(wtp_df)
+
+# Add table to the Word document
+doc <- body_add_flextable(doc, value = wtp_table)
+
+# Save the document
+print(doc, target = "WTP_Report.docx")
+```
+
+# Only Republicans
+
+```{r}
+data.rep = data1 %>% 
+  filter(republican==1)
+```
+
+```{r}
+cbc.tab = data.rep %>% 
+  select(pension,firearms, fossil_fuels, may_employ_children, racial_diversity_mgmt, gender_equal_pay)
+
+```
+
+```{r}
+cbc.tab = cbc.tab %>% 
+  mutate(pension = case_when(pension == 20000 ~ 1,
+                             pension == 25000 ~2,
+                             pension == 30000 ~3,
+                             pension == 35000 ~4,
+                             pension == 40000 ~5,
+                             pension ==45000 ~6,
+                             pension ==50000 ~7,
+                             pension == 55000 ~8,
+                             pension ==60000 ~9),
+         firearms = case_when(firearms == "Invests in firearms" ~ 1,
+                              firearms == "Does not invest in firearms" ~ 2),
+         fossil_fuels = case_when(fossil_fuels == "Invests in fossil fuels" ~ 1,
+                                  fossil_fuels == "Does not invest in fossil fuels" ~ 2),
+         may_employ_children = case_when(may_employ_children == "Invests in firms that may employ children" ~1,
+                                         may_employ_children == "Invests in firms that ensure no children are employed" ~2),
+         racial_diversity_mgmt = case_when(racial_diversity_mgmt == "Does not advocate for racial diversity in management" ~1,
+                                      racial_diversity_mgmt == "Advocates for racial diversity in management" ~2),
+         gender_equal_pay = case_when(gender_equal_pay == "Does not advocate for equal pay for men and women" ~1,
+                                      gender_equal_pay=="Advocates for equal pay for men and women"~2))
+
+cbc.tasks = 12
+
+cbc.concepts = 2
+
+```
+
+```{r}
+cbc.win = data.rep$choice_indicator
+
+N = nrow(data.rep)/24
+```
+
+
+```{r}
+set.seed(123)
+cbc.hb <- estimateMNLfromDesignHB(tmp.des=cbc.tab, tmp.win=cbc.win, 
+                                  kCards=cbc.concepts, kTrials=cbc.tasks,
+                                  kResp=N , mcmcIters=10000)
+```
+
+```{r}
+cbc.est        <- data.frame(extractHBbetas(cbc.hb, cbc.attrs))
+names(cbc.est) <- cbc.levels
+cbc.est$ID     <- 1:nrow(cbc.est)
+
+library(ggplot2)
+library(reshape2)
+cbc.m <- melt(cbc.est, id.vars = "ID")
+
+library(ggridges)
+ggplot(data=cbc.m, aes(x=value, y=variable, group=variable)) +
+      geom_density_ridges(scale=0.9, alpha=0, jittered_points=TRUE,
+                          rel_min_height=0.005,
+                          position="points_sina",
+                          point_color = "blue", point_alpha=1/sqrt(N),
+                          point_size=2.5) +
+        ylab("Item") + 
+        xlab("Relative preference (blue circles=individuals)") +
+        ggtitle("Preference estimates: Distribution of individuals")
+```
+# WTP. Republicans only
+
+## Data Loading 
+```{r}
+# Load and filter data for republican subsample
+data1 <- read_csv("datacj1.csv")
+data1 <- as.data.frame(data1) %>% 
+  filter(republican==1)
+
+```
+
+```{r}
+data1 = data1 %>% 
+  mutate(expected_pension = as.character(expected_pension))
+
+data1 = data1 %>%
+  mutate(pension = parse_number(expected_pension))
+
+```
+
+
+```{r include=FALSE}
+#This code below worked!
+
+data1 = data1 %>%
+ group_by(survey_id, choice_set) %>%
+ mutate(obs_id = cur_group_id()) %>% 
+  ungroup() # I had forgotten to do this!
+```
+
+```{r}
+# Preprocessing
+
+#'*Following choicetools vignette*
+cbc.tab = data1 %>% 
+  select(pension,firearms, fossil_fuels, may_employ_children, racial_diversity_mgmt, gender_equal_pay)
+
+cbc.tab = cbc.tab %>% 
+  mutate(pension = case_when(pension == 20000 ~ 1,
+                             pension == 25000 ~2,
+                             pension == 30000 ~3,
+                             pension == 35000 ~4,
+                             pension == 40000 ~5,
+                             pension ==45000 ~6,
+                             pension ==50000 ~7,
+                             pension == 55000 ~8,
+                             pension ==60000 ~9),
+         firearms = case_when(firearms == "Invests in firearms" ~ 1,
+                              firearms == "Does not invest in firearms" ~ 2),
+         fossil_fuels = case_when(fossil_fuels == "Invests in fossil fuels" ~ 1,
+                                  fossil_fuels == "Does not invest in fossil fuels" ~ 2),
+         may_employ_children = case_when(may_employ_children == "Invests in firms that may employ children" ~1,
+                                         may_employ_children == "Invests in firms that ensure no children are employed" ~2),
+         racial_diversity_mgmt = case_when(racial_diversity_mgmt == "Does not advocate for racial diversity in management" ~1,
+                                      racial_diversity_mgmt == "Advocates for racial diversity in management" ~2),
+         gender_equal_pay = case_when(gender_equal_pay == "Does not advocate for equal pay for men and women" ~1,
+                                      gender_equal_pay=="Advocates for equal pay for men and women"~2))
+
+cbc.win = data1$choice_indicator
+
+cbc.tasks = 12
+
+cbc.concepts = 2
+
+N = nrow(data1)/24
+```
+
+```{r}
+
+cbc.attrs <- c(pension=9, firearms=2, fossil_fuels=2, may_employ_children=2, racial_diversity_mgmt=2, gender_equal_pay=2)
+
+attr.list=cbc.attrs
+
+cbc.levels    <- c("$20,000", "$25,000", "$30,000", "$35,000", "$40,000", "$45,000", "$50,000", "$55,000", "$60,000",    # pension
+                   "Invests in firearms", "Does not invests in firearms",  # firearms
+                   "Invests in fossil fuels",  "Does not invest in fossil fuels",  # fossil fuels
+                   "Invests in firms that may employ children",  "Invests in firms that ensure no children are employed",                          # child labor
+                   "Does not advocate for racial diversity in management", "Advocates for racial diversity in management", # racial diversity
+                   "Does not advocate for equal pay for men and women", "Advocates for equal pay for men and women")           # equal pay 
+
+```
+
+#HB Estimation
+
+```{r}
+
+# HB Estimation
+set.seed(123)
+
+cbc.hb <- estimateMNLfromDesignHB(
+  tmp.des = cbc.tab, tmp.win = cbc.win,
+  kCards = cbc.concepts, kTrials = cbc.tasks,
+  kResp = N, mcmcIters = 10000
+)
+
+
+```
+# WTP Estimation
+
+```{r}
+# Extract rbetas (directly from HB output)
+rbetas <- read.csv("RBetas.csv")
+
+# Define attribute mappings with descriptive labels
+attribute_pairs <- list(
+  "Firearms" = c("A2B1", "A2B2"),
+  "Fossil_Fuels" = c("A3B1", "A3B2"),
+  "Child_Labor" = c("A4B1", "A4B2"),
+  "Racial_Diversity" = c("A5B1", "A5B2"),
+  "Gender_Pay" = c("A6B1", "A6B2")
+)
+
+# Define pension levels (cost attribute)
+pension_levels <- c("A1B1", "A1B2", "A1B3", "A1B4", "A1B5", "A1B6", "A1B7", "A1B8", "A1B9")
+pension_values <- c(20, 25, 30, 35, 40, 45, 50, 55, 60)
+
+# Step 1: Compute individual-level Δβ (part-worth differences)
+individual_delta_beta <- apply(rbetas, 1, function(beta_row) {
+  sapply(attribute_pairs, function(pair) {
+    beta_row[pair[1]] - beta_row[pair[2]] # baseline - policy
+  })
+})
+
+# Convert to matrix form (transpose so attributes are columns)
+individual_delta_beta <- t(individual_delta_beta)
+
+# Step 2: Compute β_cost (marginal utility of pension) **per respondent**
+individual_beta_cost <- apply(rbetas[, pension_levels], 1, function(beta_row) {
+  (beta_row[length(pension_levels)] - beta_row[1]) /
+    (pension_values[length(pension_values)] - pension_values[1])
+})
+
+# Step 3: Compute WTP for each respondent
+individual_wtp <- sweep(individual_delta_beta, 1, individual_beta_cost, "/") * -1000
+
+# Step 4: Compute median WTP across respondents (Conjointly's method)
+wtp_medians <- apply(individual_wtp, 2, median)
+
+# Assign readable attribute names
+attribute_names <- c("Firearms", "Fossil Fuels", "Child Labor", "Racial Diversity", "Gender Pay")
+
+# Create a WTP dataframe
+wtp_df <- data.frame(Attribute = attribute_names, WTP = wtp_medians)
+
+# Step 5: Define **corrected** bootstrap function
+bootstrap_wtp <- function(data, indices) {
+  sampled_data <- data[indices, , drop = FALSE] # Resample respondents
+  apply(sampled_data, 2, median) # Compute median WTP per bootstrap sample
+}
+
+# Step 6: Run bootstrap with 1000 iterations **on WTP directly**
+set.seed(123)
+boot_results <- boot(data = individual_wtp, statistic = bootstrap_wtp, R = 1000)
+
+# Step 7: Compute **corrected** standard errors and confidence intervals
+wtp_df$SE <- apply(boot_results$t, 2, sd)
+wtp_df$Lower_CI <- apply(boot_results$t, 2, quantile, probs = 0.025)
+wtp_df$Upper_CI <- apply(boot_results$t, 2, quantile, probs = 0.975)
+
+# Print final WTP table with standard errors and confidence intervals
+print(wtp_df)
+
+```
+
+
+```{r}
+# Create a Word document
+doc <- read_docx()
+
+# Convert WTP dataframe into a flextable
+wtp_table <- flextable(wtp_df)
+
+# Add table to the Word document
+doc <- body_add_flextable(doc, value = wtp_table)
+
+# Save the document
+print(doc, target = "WTP_Report_rep.docx")
+
+```
+
+# Simulation Republicans
+
+## Market Share Simulations
+
+```{r}
+prod1 <- c(7, 10, 12,  14, 16, 18)     # $45,000 pension with no sustainable features
+prod2 <- c(7, 11, 13, 15, 17, 19)     # $45,000 pension with only
+
+```
+
+
+
+```{r}
+
+# Function to calculate market shares for a given sample of preferences
+market_share_simulation <- function(data, indices) {
+  sampled_data <- data[indices, ] # Resample respondents
+  usb.pref <- marketSim(
+    sampled_data,
+    list(prod1, prod2), 
+    use.none = FALSE,
+    style = "first"
+  )
+  colMeans(usb.pref) # Return mean market shares for the two products
+}
+
+# Bootstrap to calculate confidence intervals
+set.seed(123)
+boot_results <- boot(
+  data = cbc.est,
+  statistic = market_share_simulation,
+  R = 1000 # Number of bootstrap resamples
+)
+
+# Extract mean market shares and confidence intervals
+mean_market_shares <- colMeans(marketSim(cbc.est, list(prod1, prod2), use.none = FALSE, style = "first"))
+ci_lower <- apply(boot_results$t, 2, quantile, probs = 0.025)
+ci_upper <- apply(boot_results$t, 2, quantile, probs = 0.975)
+
+# Combine results into a dataframe
+market_share_results <- data.frame(
+  Product = c("Product 1", "Product 2"),
+  Mean_Market_Share = mean_market_shares,
+  CI_Lower = ci_lower,
+  CI_Upper = ci_upper
+)
+
+# Print results
+print(market_share_results)
+```
+
+## Forego 5K
+
+```{r}
+prod1 <- c(7, 10, 12,  14, 16, 18)     # $45,000 pension with no sustainable features
+prod2 <- c(6, 11, 13, 15, 17, 19)     # $40,000 pension with only
+
+```
+
+
+
+```{r}
+
+# Function to calculate market shares for a given sample of preferences
+market_share_simulation <- function(data, indices) {
+  sampled_data <- data[indices, ] # Resample respondents
+  usb.pref <- marketSim(
+    sampled_data,
+    list(prod1, prod2), 
+    use.none = FALSE,
+    style = "first"
+  )
+  colMeans(usb.pref) # Return mean market shares for the two products
+}
+
+# Bootstrap to calculate confidence intervals
+set.seed(123)
+boot_results <- boot(
+  data = cbc.est,
+  statistic = market_share_simulation,
+  R = 1000 # Number of bootstrap resamples
+)
+
+# Extract mean market shares and confidence intervals
+mean_market_shares <- colMeans(marketSim(cbc.est, list(prod1, prod2), use.none = FALSE, style = "first"))
+ci_lower <- apply(boot_results$t, 2, quantile, probs = 0.025)
+ci_upper <- apply(boot_results$t, 2, quantile, probs = 0.975)
+
+# Combine results into a dataframe
+market_share_results <- data.frame(
+  Product = c("Product 1", "Product 2"),
+  Mean_Market_Share = mean_market_shares,
+  CI_Lower = ci_lower,
+  CI_Upper = ci_upper
+)
+
+# Print results
+print(market_share_results)
+```
+
+
+# Anti-ESG Prior
+
+
+## Data Loading 
+```{r}
+# Load and filter data for republican subsample
+data1 <- read_csv("datacj1.csv")
+data1 <- as.data.frame(data1) %>% 
+  filter(prior==0)
+
+```
+
+```{r}
+data1 = data1 %>% 
+  mutate(expected_pension = as.character(expected_pension))
+
+data1 = data1 %>%
+  mutate(pension = parse_number(expected_pension))
+
+```
+
+
+```{r include=FALSE}
+#This code below worked!
+
+data1 = data1 %>%
+ group_by(survey_id, choice_set) %>%
+ mutate(obs_id = cur_group_id()) %>% 
+  ungroup() # I had forgotten to do this!
+```
+
+```{r}
+# Preprocessing
+
+#'*Following choicetools vignette*
+cbc.tab = data1 %>% 
+  select(pension,firearms, fossil_fuels, may_employ_children, racial_diversity_mgmt, gender_equal_pay)
+
+cbc.tab = cbc.tab %>% 
+  mutate(pension = case_when(pension == 20000 ~ 1,
+                             pension == 25000 ~2,
+                             pension == 30000 ~3,
+                             pension == 35000 ~4,
+                             pension == 40000 ~5,
+                             pension ==45000 ~6,
+                             pension ==50000 ~7,
+                             pension == 55000 ~8,
+                             pension ==60000 ~9),
+         firearms = case_when(firearms == "Invests in firearms" ~ 1,
+                              firearms == "Does not invest in firearms" ~ 2),
+         fossil_fuels = case_when(fossil_fuels == "Invests in fossil fuels" ~ 1,
+                                  fossil_fuels == "Does not invest in fossil fuels" ~ 2),
+         may_employ_children = case_when(may_employ_children == "Invests in firms that may employ children" ~1,
+                                         may_employ_children == "Invests in firms that ensure no children are employed" ~2),
+         racial_diversity_mgmt = case_when(racial_diversity_mgmt == "Does not advocate for racial diversity in management" ~1,
+                                      racial_diversity_mgmt == "Advocates for racial diversity in management" ~2),
+         gender_equal_pay = case_when(gender_equal_pay == "Does not advocate for equal pay for men and women" ~1,
+                                      gender_equal_pay=="Advocates for equal pay for men and women"~2))
+
+cbc.win = data1$choice_indicator
+
+cbc.tasks = 12
+
+cbc.concepts = 2
+
+N = nrow(data1)/24
+```
+
+```{r}
+
+cbc.attrs <- c(pension=9, firearms=2, fossil_fuels=2, may_employ_children=2, racial_diversity_mgmt=2, gender_equal_pay=2)
+
+attr.list=cbc.attrs
+
+cbc.levels    <- c("$20,000", "$25,000", "$30,000", "$35,000", "$40,000", "$45,000", "$50,000", "$55,000", "$60,000",    # pension
+                   "Invests in firearms", "Does not invests in firearms",  # firearms
+                   "Invests in fossil fuels",  "Does not invest in fossil fuels",  # fossil fuels
+                   "Invests in firms that may employ children",  "Invests in firms that ensure no children are employed",                          # child labor
+                   "Does not advocate for racial diversity in management", "Advocates for racial diversity in management", # racial diversity
+                   "Does not advocate for equal pay for men and women", "Advocates for equal pay for men and women")           # equal pay 
+
+```
+
+#HB Estimation
+
+```{r}
+
+# HB Estimation
+set.seed(123)
+
+cbc.hb <- estimateMNLfromDesignHB(
+  tmp.des = cbc.tab, tmp.win = cbc.win,
+  kCards = cbc.concepts, kTrials = cbc.tasks,
+  kResp = N, mcmcIters = 10000
+)
+
+
+```
+# WTP Estimation
+
+```{r}
+# Extract rbetas (directly from HB output)
+rbetas <- read.csv("RBetas.csv")
+
+# Define attribute mappings with descriptive labels
+attribute_pairs <- list(
+  "Firearms" = c("A2B1", "A2B2"),
+  "Fossil_Fuels" = c("A3B1", "A3B2"),
+  "Child_Labor" = c("A4B1", "A4B2"),
+  "Racial_Diversity" = c("A5B1", "A5B2"),
+  "Gender_Pay" = c("A6B1", "A6B2")
+)
+
+# Define pension levels (cost attribute)
+pension_levels <- c("A1B1", "A1B2", "A1B3", "A1B4", "A1B5", "A1B6", "A1B7", "A1B8", "A1B9")
+pension_values <- c(20, 25, 30, 35, 40, 45, 50, 55, 60)
+
+# Step 1: Compute individual-level Δβ (part-worth differences)
+individual_delta_beta <- apply(rbetas, 1, function(beta_row) {
+  sapply(attribute_pairs, function(pair) {
+    beta_row[pair[1]] - beta_row[pair[2]] # baseline - policy
+  })
+})
+
+# Convert to matrix form (transpose so attributes are columns)
+individual_delta_beta <- t(individual_delta_beta)
+
+# Step 2: Compute β_cost (marginal utility of pension) **per respondent**
+individual_beta_cost <- apply(rbetas[, pension_levels], 1, function(beta_row) {
+  (beta_row[length(pension_levels)] - beta_row[1]) /
+    (pension_values[length(pension_values)] - pension_values[1])
+})
+
+# Step 3: Compute WTP for each respondent
+individual_wtp <- sweep(individual_delta_beta, 1, individual_beta_cost, "/") * -1000
+
+# Step 4: Compute median WTP across respondents (Conjointly's method)
+wtp_medians <- apply(individual_wtp, 2, median)
+
+# Assign readable attribute names
+attribute_names <- c("Firearms", "Fossil Fuels", "Child Labor", "Racial Diversity", "Gender Pay")
+
+# Create a WTP dataframe
+wtp_df <- data.frame(Attribute = attribute_names, WTP = wtp_medians)
+
+# Step 5: Define **corrected** bootstrap function
+bootstrap_wtp <- function(data, indices) {
+  sampled_data <- data[indices, , drop = FALSE] # Resample respondents
+  apply(sampled_data, 2, median) # Compute median WTP per bootstrap sample
+}
+
+# Step 6: Run bootstrap with 1000 iterations **on WTP directly**
+set.seed(123)
+boot_results <- boot(data = individual_wtp, statistic = bootstrap_wtp, R = 1000)
+
+# Step 7: Compute **corrected** standard errors and confidence intervals
+wtp_df$SE <- apply(boot_results$t, 2, sd)
+wtp_df$Lower_CI <- apply(boot_results$t, 2, quantile, probs = 0.025)
+wtp_df$Upper_CI <- apply(boot_results$t, 2, quantile, probs = 0.975)
+
+# Print final WTP table with standard errors and confidence intervals
+print(wtp_df)
+
+```
+
+
+```{r}
+# Create a Word document
+doc <- read_docx()
+
+# Convert WTP dataframe into a flextable
+wtp_table <- flextable(wtp_df)
+
+# Add table to the Word document
+doc <- body_add_flextable(doc, value = wtp_table)
+
+# Save the document
+print(doc, target = "WTP_Report_antiprior.docx")
+
+```
+
+# Simulation Anti-ESG Prior
+
+## Market Share Simulations
+
+```{r}
+prod1 <- c(7, 10, 12,  14, 16, 18)     # $45,000 pension with no sustainable features
+prod2 <- c(7, 11, 13, 15, 17, 19)     # $45,000 pension with only
+
+```
+
+
+
+```{r}
+
+# Function to calculate market shares for a given sample of preferences
+market_share_simulation <- function(data, indices) {
+  sampled_data <- data[indices, ] # Resample respondents
+  usb.pref <- marketSim(
+    sampled_data,
+    list(prod1, prod2), 
+    use.none = FALSE,
+    style = "first"
+  )
+  colMeans(usb.pref) # Return mean market shares for the two products
+}
+
+# Bootstrap to calculate confidence intervals
+set.seed(123)
+boot_results <- boot(
+  data = cbc.est,
+  statistic = market_share_simulation,
+  R = 1000 # Number of bootstrap resamples
+)
+
+# Extract mean market shares and confidence intervals
+mean_market_shares <- colMeans(marketSim(cbc.est, list(prod1, prod2), use.none = FALSE, style = "first"))
+ci_lower <- apply(boot_results$t, 2, quantile, probs = 0.025)
+ci_upper <- apply(boot_results$t, 2, quantile, probs = 0.975)
+
+# Combine results into a dataframe
+market_share_results <- data.frame(
+  Product = c("Product 1", "Product 2"),
+  Mean_Market_Share = mean_market_shares,
+  CI_Lower = ci_lower,
+  CI_Upper = ci_upper
+)
+
+# Print results
+print(market_share_results)
+```
+
+## Forego 5K
+
+```{r}
+prod1 <- c(7, 10, 12,  14, 16, 18)     # $45,000 pension with no sustainable features
+prod2 <- c(6, 11, 13, 15, 17, 19)     # $40,000 pension with only
+
+```
+
+
+
+```{r}
+
+# Function to calculate market shares for a given sample of preferences
+market_share_simulation <- function(data, indices) {
+  sampled_data <- data[indices, ] # Resample respondents
+  usb.pref <- marketSim(
+    sampled_data,
+    list(prod1, prod2), 
+    use.none = FALSE,
+    style = "first"
+  )
+  colMeans(usb.pref) # Return mean market shares for the two products
+}
+
+# Bootstrap to calculate confidence intervals
+set.seed(123)
+boot_results <- boot(
+  data = cbc.est,
+  statistic = market_share_simulation,
+  R = 1000 # Number of bootstrap resamples
+)
+
+# Extract mean market shares and confidence intervals
+mean_market_shares <- colMeans(marketSim(cbc.est, list(prod1, prod2), use.none = FALSE, style = "first"))
+ci_lower <- apply(boot_results$t, 2, quantile, probs = 0.025)
+ci_upper <- apply(boot_results$t, 2, quantile, probs = 0.975)
+
+# Combine results into a dataframe
+market_share_results <- data.frame(
+  Product = c("Product 1", "Product 2"),
+  Mean_Market_Share = mean_market_shares,
+  CI_Lower = ci_lower,
+  CI_Upper = ci_upper
+)
+
+# Print results
+print(market_share_results)
+```
+
+
+```
+
